@@ -5,9 +5,18 @@ import pandas as pd
 from statsmodels.tsa.stattools import grangercausalitytests
 from warnings import warn
 from scipy import signal
+
+
+class NotEnoughContinuousData(Exception):
+    pass
+
+
+class NotEnoughData(Exception):
+    pass
+
+
 def _assert_xr_time_index_continuity(da, timedim='time', time_freq='1D',
                                      chunk_threshold=0):
-
     def numpy_test_boolean_wrapper(a, b, verbose=False):
         if verbose:
             print(a, b)
@@ -19,6 +28,7 @@ def _assert_xr_time_index_continuity(da, timedim='time', time_freq='1D',
             return True
 
     da = da.copy()
+    da = da.sortby('time')
     # Converting the required time interval to seconds
     timedelta = int(pd.to_timedelta(time_freq).total_seconds())
     timedelta = np.timedelta64(str(timedelta), 's')
@@ -42,7 +52,7 @@ def _assert_xr_time_index_continuity(da, timedim='time', time_freq='1D',
         continuous_chunk_sizes = np.diff(continuous_chunk_sizes)
         #
         if np.max(continuous_chunk_sizes) < chunk_threshold:
-            raise ValueError('Not enough continuous data.')
+            raise NotEnoughContinuousData('Not enough continuous data.')
 
         # Finding starting a ending indexes of the largest continuous chunk
         idx_of_greater_continuous_chunk = int(np.where(continuous_chunk_sizes == np.max(continuous_chunk_sizes))[0])
@@ -51,7 +61,7 @@ def _assert_xr_time_index_continuity(da, timedim='time', time_freq='1D',
             end_idx = np.max(continuous_chunk_sizes)  # Ending index
             start_idx = 0
         elif idx_of_greater_continuous_chunk > 0:
-            start_idx = continuous_chunk_sizes[idx_of_greater_continuous_chunk - 1] + 1 #  Plus one to skipe the problematic interval
+            start_idx = positions_with_discontinuos_time[idx_of_greater_continuous_chunk-1] + 1 #  Plus one to skip the problematic interval
             end_idx = start_idx + np.max(continuous_chunk_sizes)
         else:
             raise ValueError('idx_of_greater_chunk_size is negative valued - this is not allowed.')
@@ -107,7 +117,8 @@ class GrangerCausality:
         self.sampledim = sampledim
 
     def run(self, da_x, da_y, maxlag=None, detrend=False,
-            granger_test='params_ftest', test_stationarity=True):
+            granger_test='params_ftest', test_stationarity=True, critical_level='5%',
+            testtype='c'):
         """
 
         Parameters
@@ -118,6 +129,7 @@ class GrangerCausality:
         -------
 
         """
+
         assert len(da_x.dims) == 2, 'Features array must be 2D.'
         assert len(da_y.dims) == 1, 'Response array must be 1D.'
 
@@ -126,17 +138,20 @@ class GrangerCausality:
 
         da_x = da_x.dropna(self.sampledim, how='any')
         da_y = da_y.dropna(self.sampledim, how='any')
-        da_x = _assert_xr_time_index_continuity(da_x, timedim='time')
-        da_y = _assert_xr_time_index_continuity(da_y, timedim='time')
+        if da_x[self.sampledim].shape[0] < 10 or da_y[self.sampledim].shape[0] < 10:
+            raise NotEnoughData
+        da_x = _assert_xr_time_index_continuity(da_x, timedim='time', chunk_threshold=10)
+        da_y = _assert_xr_time_index_continuity(da_y, timedim='time', chunk_threshold=10)
         if detrend:
             original_dimorder = da_x.dims
+
             da_x = da_x.transpose(..., self.sampledim).copy(data=signal.detrend(da_x.transpose(..., self.sampledim)))
             da_x = da_x.transpose(*original_dimorder)
         da_x, da_y = xr.align(da_x, da_y)
 
         if test_stationarity:
             stationary_mask = ADF_test(da_x, featuredim=self.featuredim, sampledim=self.sampledim,
-                                       critical_level='5%')
+                                       critical_level=critical_level, testtype=testtype)
 
             da_x_dropped = da_x.where(stationary_mask, drop=True)
             dropped = set(da_x[self.featuredim].values.tolist()).difference(set(da_x_dropped[self.featuredim].values.tolist()))
@@ -152,7 +167,7 @@ class GrangerCausality:
         list_of_pval_arrays = []
         for feature in features_x:
             X = da_x.sel({self.featuredim: feature}).values
-            res = grangercausalitytests(np.column_stack([Y, X]), maxlag=maxlag)
+            res = grangercausalitytests(np.column_stack([Y, X]), maxlag=maxlag, verbose=False)
             pvals = []
             for lag in range(1, maxlag):
                 pvals.append(res[lag][0][granger_test][1])  # Fetching the p-value
