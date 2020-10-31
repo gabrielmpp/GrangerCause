@@ -167,7 +167,7 @@ class GrangerCausality:
         list_of_pval_arrays = []
         for feature in features_x:
             X = da_x.sel({self.featuredim: feature}).values
-            res = grangercausalitytests(np.column_stack([Y, X]), maxlag=maxlag, verbose=False)
+            res = grangercausalitytests(np.column_stack([Y, X]), maxlag=maxlag, verbose=True)
             pvals = []
             for lag in range(1, maxlag):
                 pvals.append(res[lag][0][granger_test][1])  # Fetching the p-value
