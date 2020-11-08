@@ -11,6 +11,10 @@ class NotEnoughContinuousData(Exception):
     pass
 
 
+class NonStationaryError(Exception):
+    pass
+
+
 class NotEnoughData(Exception):
     pass
 
@@ -75,7 +79,7 @@ def _assert_xr_time_index_continuity(da, timedim='time', time_freq='1D',
         return da
 
 
-def ADF_test(da_x, featuredim, sampledim, critical_level=None, testtype='c'):
+def ADF_test(da_x, featuredim, sampledim, critical_level=None, testtype='c', maxlag=None):
     """
     Assert stationary of 2D xarray dataarrays
     Parameters
@@ -98,7 +102,7 @@ def ADF_test(da_x, featuredim, sampledim, critical_level=None, testtype='c'):
     for feature in features:
         to_test = da_x.sel({featuredim: feature}).dropna(sampledim, how='any').values
         threshold = stm.tsa.stattools.adfuller(to_test, regression=testtype)[4][critical_level]
-        adf = stm.tsa.stattools.adfuller(to_test, regression=testtype)[0]
+        adf = stm.tsa.stattools.adfuller(np.diff(to_test), maxlag=maxlag, regression=testtype)[0]
         if isinstance(adf, (float, int)):
             test_results.append(adf < threshold)
         else:
@@ -117,7 +121,8 @@ class GrangerCausality:
         self.sampledim = sampledim
 
     def run(self, da_x, da_y, maxlag=None, detrend=False,
-            granger_test='params_ftest', test_stationarity=True, critical_level='5%',
+            granger_test='params_ftest', test_stationarity_x=True, test_stationarity_y=True,
+            critical_level='5%',
             testtype='c'):
         """
 
@@ -129,7 +134,7 @@ class GrangerCausality:
         -------
 
         """
-
+        self.maxlag = maxlag
         assert len(da_x.dims) == 2, 'Features array must be 2D.'
         assert len(da_y.dims) == 1, 'Response array must be 1D.'
 
@@ -149,16 +154,31 @@ class GrangerCausality:
             da_x = da_x.transpose(*original_dimorder)
         da_x, da_y = xr.align(da_x, da_y)
 
-        if test_stationarity:
-            stationary_mask = ADF_test(da_x, featuredim=self.featuredim, sampledim=self.sampledim,
-                                       critical_level=critical_level, testtype=testtype)
+        if test_stationarity_x:
+            stationary_mask_x = ADF_test(da_x, featuredim=self.featuredim, sampledim=self.sampledim,
+                                       critical_level=critical_level, testtype=testtype, maxlag=maxlag)
 
-            da_x_dropped = da_x.where(stationary_mask, drop=True)
-            dropped = set(da_x[self.featuredim].values.tolist()).difference(set(da_x_dropped[self.featuredim].values.tolist()))
-            if len(dropped) > 0:
+            da_x_dropped = da_x.where(stationary_mask_x, drop=True)
+            dropped_x = set(da_x[self.featuredim].values.tolist()).difference(set(da_x_dropped[self.featuredim].values.tolist()))
+            if len(dropped_x) > 0:
                 warn('The following features are stationary and were dropped: ')
-                print(dropped)
+                print(dropped_x)
             da_x = da_x_dropped
+
+        if test_stationarity_y:
+            da_y = da_y.assign_coords(dummy_featuredim=0)
+            da_y = da_y.expand_dims('dummy_featuredim')
+            stationary_mask_y = ADF_test(da_y, featuredim='dummy_featuredim',
+                                       sampledim=self.sampledim,
+                                       critical_level=critical_level, testtype=testtype,
+                                         maxlag=maxlag)
+
+            da_y_dropped = da_y.where(stationary_mask_y, drop=True)
+            dropped_y = set(da_y['dummy_featuredim'].values.tolist()).difference(set(da_y_dropped['dummy_featuredim'].values.tolist()))
+            if len(dropped_y) > 0:
+                raise NonStationaryError('Target variable failed the stationarity test.')
+            da_y = da_y_dropped.isel(dummy_featuredim=0).drop('dummy_featuredim')
+
         features_x = da_x[self.featuredim].values
 
         if isinstance(maxlag, type(None)):
