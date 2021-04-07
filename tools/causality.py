@@ -7,6 +7,7 @@ from warnings import warn
 from scipy import signal
 
 
+
 class NotEnoughContinuousData(Exception):
     pass
 
